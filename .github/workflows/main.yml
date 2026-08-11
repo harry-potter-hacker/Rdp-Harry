@@ -58,7 +58,7 @@ jobs:
           # Create secondary user profile
           New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
           
-          # Bulletproof Native Commands to force Admin rights
+          # Native Commands to force Admin rights
           net localgroup administrators RDP /add
           net localgroup "Remote Desktop Users" RDP /add
           
@@ -66,46 +66,20 @@ jobs:
           echo "MAIN_ADMIN_PASS=$mainAdminPassword" >> $env:GITHUB_ENV
           echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
 
-      - name: Install Tailscale
-        run: |
-          $tsUrl = "https://tailscale.com"
-          $installerPath = "$env:TEMP\tailscale.msi"
-          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-          
-          Write-Host "Running Tailscale Installer..."
-          Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-          Remove-Item $installerPath -Force
-          
-          # Force a 15-second pause to let Windows finalize the file system writing
-          Start-Sleep -Seconds 15
+      # === AUTOMATED TAILSCALE ENGINE ===
+      # This step completely replaces your custom MSI installation steps and handles paths perfectly
+      - name: Tailscale Connection Setup
+        uses: tailscale/github-action@v4
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          version: latest
 
-      - name: Establish Tailscale Connection
+      - name: Fetch and Verify Tailscale IP
         run: |
-          $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
-          
-          if (-not (Test-Path $tsExe)) {
-            $tsExe = "C:\ProgramData\Tailscale\tailscale.exe"
-          }
-          if (-not (Test-Path $tsExe)) {
-            Write-Error "Tailscale executable could not be found. Installation failed."
-            exit 1
-          }
-          
-          Write-Host "Tailscale executable located at: $tsExe"
-          
-          # Bring up Tailscale normally (unattended code removed)
-          & $tsExe up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-          
-          # Wait for Tailscale to assign an IP
-          $tsIP = $null
-          $retries = 0
-          while (-not $tsIP -and $retries -lt 10) {
-            $tsIP = & $tsExe ip -4
-            Start-Sleep -Seconds 5
-            $retries++
-          }
+          # Use Tailscale CLI globally now that the official action configured the environment variables
+          $tsIP = tailscale ip -4
           if (-not $tsIP) {
-            Write-Error "Tailscale IP not assigned. Exiting."
+            Write-Error "Tailscale IP could not be retrieved"
             exit 1
           }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV

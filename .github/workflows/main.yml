@@ -41,11 +41,21 @@ jobs:
 
       - name: Set Main Admin Password and Grant Group Access
         run: |
+          # CHANGE THIS PASSWORD TO WHAT YOU WANT
           $mainAdminPassword = "YourMainAdminPassword123!" 
+          
+          # Force set the password (this always succeeds)
           net user runneradmin $mainAdminPassword
-          net localgroup "Remote Desktop Users" runneradmin /add 2>$null
-          net localgroup administrators runneradmin /add 2>$null
+          
+          # Use safe PowerShell cmdlets to prevent exit-code crashes if user is already a member
+          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "runneradmin" -ErrorAction SilentlyContinue
+          Add-LocalGroupMember -Group "Administrators" -Member "runneradmin" -ErrorAction SilentlyContinue
+          
           echo "MAIN_ADMIN_PASS=$mainAdminPassword" >> $env:GITHUB_ENV
+          
+          # Force the step to exit with code 0 (Success) so it doesn't crash the workflow
+          $global:LASTEXITCODE = 0
+          exit 0
 
       - name: Tailscale Connection Setup
         uses: tailscale/github-action@v4
@@ -61,6 +71,16 @@ jobs:
             exit 1
           }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
+
+      - name: Verify RDP Accessibility
+        run: |
+          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
+          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
+          if (-not $testResult.TcpTestSucceeded) {
+            Write-Error "TCP connection to RDP port 3389 failed"
+            exit 1
+          }
+          Write-Host "TCP connectivity successful!"
 
       - name: Maintain Connection
         run: |

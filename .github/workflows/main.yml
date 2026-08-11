@@ -54,8 +54,8 @@ jobs:
           # Use the pre-installed Chocolatey package manager for a foolproof silent installation
           choco install tailscale -y --no-progress
           
-          # Refresh environment variables so the new 'tailscale' path command is available instantly
-          Update-SessionEnvironment
+          # Force GitHub Actions to add the standard Tailscale path to all downstream steps
+          echo "$env:ProgramFiles\Tailscale" >> $env:GITHUB_PATH
 
       - name: Establish Tailscale Connection
         run: |

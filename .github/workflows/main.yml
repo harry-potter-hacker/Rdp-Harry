@@ -59,13 +59,27 @@ jobs:
 
       - name: Establish Tailscale Connection
         run: |
+          # Wait for tailscale.exe to safely materialize in the file system
+          $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          $exeRetries = 0
+          while (-not (Test-Path $tsExe) -and $exeRetries -lt 12) {
+            Write-Host "Waiting for Tailscale installation to settle..."
+            Start-Sleep -Seconds 5
+            $exeRetries++
+          }
+          if (-not (Test-Path $tsExe)) {
+            Write-Error "Tailscale executable was not found after installation."
+            exit 1
+          }
+
           # Bring up Tailscale with the provided auth key and set a unique hostname
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          & $tsExe up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          
           # Wait for Tailscale to assign an IP
           $tsIP = $null
           $retries = 0
           while (-not $tsIP -and $retries -lt 10) {
-            $tsIP = & "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4
+            $tsIP = & $tsExe ip -4
             Start-Sleep -Seconds 5
             $retries++
           }

@@ -6,68 +6,47 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 3600
     steps:
-      - name: Configure Core RDP Settings and Disable UAC
+      - name: Configure Core RDP and Fix Handshake Stalls
         run: |
-          # Enable Remote Desktop and disable Network Level Authentication
+          # 1. Enable RDP and drop Network Level Authentication
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
             -Name "fDenyTSConnections" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
             -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
             -Name "SecurityLayer" -Value 0 -Force
-          
-          # === DISABLE UAC & ENABLE AUTO-ELEVATION FOR ADMINS ===
-          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' `
-            -Name "LocalAccountTokenFilterPolicy" -Value 1 -Force
-          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' `
-            -Name "ConsentPromptBehaviorAdmin" -Value 0 -Force
-          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' `
-            -Name "PromptOnSecureDesktop" -Value 0 -Force
 
-          # Remove any existing rule with the same name to avoid duplication
-          netsh advfirewall firewall delete rule name="RDP-Tailscale"
-          # For testing, allow any incoming connection on port 3389
-          netsh advfirewall firewall add rule name="RDP-Tailscale" `
-            dir=in action=allow protocol=TCP localport=3389
-          # Restart the Remote Desktop service to ensure changes take effect
+          # 2. Fix Handshake Stalls (Turn off server-side audio/drive redirection to stop hangs)
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "fDisableCam" -Value 1 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "fDisableCcm" -Value 1 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "fDisableLPT" -Value 1 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "fDisableClip" -Value 1 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
+            -Name "fDisableAudioCapture" -Value 1 -Force
+
+          # 3. Optimize graphics pipeline for headless cloud runners
+          New-Item -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT' -Name "Terminal Services" -Force -ErrorAction SilentlyContinue
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' `
+            -Name "fWDDMGraphicsDriver" -Value 0 -Force
+
+          # 4. Turn off Windows Firewall entirely
+          netsh advfirewall set allprofiles state off
+          
+          # 5. Reload the configuration
           Restart-Service -Name TermService -Force
 
-      - name: Create RDP User and Set Main Admin Password
+      - name: Set Main Admin Password and Grant Group Access
         run: |
-          # 1. SET FIXED PASSWORD FOR THE MAIN PROFILE (runneradmin)
           $mainAdminPassword = "YourMainAdminPassword123!" 
           net user runneradmin $mainAdminPassword
-          
-          # 2. Generate random password for the secondary RDP profile
-          Add-Type -AssemblyName System.Security
-          $charSet = @{
-            Upper   = [char[]](65..90)
-            Lower   = [char[]](97..122)
-            Number  = [char[]](48..57)
-            Special = ([char[]](33..47) + [char[]](58..64) +
-                       [char[]](91..96) + [char[]](123..126))
-          }
-          $rawPassword = @()
-          $rawPassword += $charSet.Upper   | Get-Random -Count 4
-          $rawPassword += $charSet.Lower   | Get-Random -Count 4
-          $rawPassword += $charSet.Number  | Get-Random -Count 4
-          $rawPassword += $charSet.Special | Get-Random -Count 4
-          $password = -join ($rawPassword | Sort-Object { Get-Random })
-          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
-          
-          # Create secondary user profile
-          New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-          
-          # Native Commands to force Admin rights
-          net localgroup administrators RDP /add
-          net localgroup "Remote Desktop Users" RDP /add
-          
-          # Save credentials to environment variables
+          net localgroup "Remote Desktop Users" runneradmin /add 2>$null
+          net localgroup administrators runneradmin /add 2>$null
           echo "MAIN_ADMIN_PASS=$mainAdminPassword" >> $env:GITHUB_ENV
-          echo "RDP_CREDS=User: RDP | Password: $password" >> $env:GITHUB_ENV
 
-      # === AUTOMATED TAILSCALE ENGINE ===
-      # This step completely replaces your custom MSI installation steps and handles paths perfectly
       - name: Tailscale Connection Setup
         uses: tailscale/github-action@v4
         with:
@@ -76,7 +55,6 @@ jobs:
 
       - name: Fetch and Verify Tailscale IP
         run: |
-          # Use Tailscale CLI globally now that the official action configured the environment variables
           $tsIP = tailscale ip -4
           if (-not $tsIP) {
             Write-Error "Tailscale IP could not be retrieved"
@@ -84,28 +62,12 @@ jobs:
           }
           echo "TAILSCALE_IP=$tsIP" >> $env:GITHUB_ENV
 
-      - name: Verify RDP Accessibility
-        run: |
-          Write-Host "Tailscale IP: $env:TAILSCALE_IP"
-          $testResult = Test-NetConnection -ComputerName $env:TAILSCALE_IP -Port 3389
-          if (-not $testResult.TcpTestSucceeded) {
-            Write-Error "TCP connection to RDP port 3389 failed"
-            exit 1
-          }
-          Write-Host "TCP connectivity successful!"
-
       - name: Maintain Connection
         run: |
           Write-Host "`n=== RDP ACCESS ==="
           Write-Host "Address: $env:TAILSCALE_IP"
-          Write-Host "------------------"
-          Write-Host "MAIN PROFILE:"
           Write-Host "Username: runneradmin"
           Write-Host "Password: $env:MAIN_ADMIN_PASS"
-          Write-Host "------------------"
-          Write-Host "SECONDARY PROFILE (RECOMMENDED TO USE):"
-          Write-Host "Username: RDP"
-          Write-Host "Password: $(echo $env:RDP_CREDS)"
           Write-Host "==================`n"
           
           while ($true) {

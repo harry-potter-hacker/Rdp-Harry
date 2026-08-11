@@ -6,7 +6,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 3600
     steps:
-      - name: Configure Core RDP Settings
+      - name: Configure Core RDP Settings and Disable UAC
         run: |
           # Enable Remote Desktop and disable Network Level Authentication
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
@@ -15,6 +15,17 @@ jobs:
             -Name "UserAuthentication" -Value 0 -Force
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' `
             -Name "SecurityLayer" -Value 0 -Force
+          
+          # === DISABLE UAC & ENABLE AUTO-ELEVATION FOR ADMINS ===
+          # Force local admin accounts to get full elevated privileges automatically
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' `
+            -Name "LocalAccountTokenFilterPolicy" -Value 1 -Force
+          # Suppress the UAC prompt and auto-approve administrative actions
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' `
+            -Name "ConsentPromptBehaviorAdmin" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' `
+            -Name "PromptOnSecureDesktop" -Value 0 -Force
+
           # Remove any existing rule with the same name to avoid duplication
           netsh advfirewall firewall delete rule name="RDP-Tailscale"
           # For testing, allow any incoming connection on port 3389
@@ -26,7 +37,6 @@ jobs:
       - name: Create RDP User and Set Main Admin Password
         run: |
           # 1. SET FIXED PASSWORD FOR THE MAIN PROFILE (runneradmin)
-          # CHANGE THIS PASSWORD TO WHAT YOU WANT
           $mainAdminPassword = "YourMainAdminPassword123!" 
           net user runneradmin $mainAdminPassword
           
@@ -49,8 +59,10 @@ jobs:
           
           # Create secondary user profile
           New-LocalUser -Name "RDP" -Password $securePass -AccountNeverExpires
-          Add-LocalGroupMember -Group "Administrators" -Member "RDP"
-          Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
+          
+          # Bulletproof Native Commands to force Admin rights
+          net localgroup administrators RDP /add
+          net localgroup "Remote Desktop Users" RDP /add
           
           # Save credentials to environment variables
           echo "MAIN_ADMIN_PASS=$mainAdminPassword" >> $env:GITHUB_ENV
@@ -58,7 +70,7 @@ jobs:
 
       - name: Install Tailscale
         run: |
-          $tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
+          $tsUrl = "https://tailscale.com"
           $installerPath = "$env:TEMP\tailscale.msi"
           Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
           Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
@@ -66,8 +78,8 @@ jobs:
 
       - name: Establish Tailscale Connection
         run: |
-          # Bring up Tailscale with the provided auth key and set a unique hostname
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
+          # Bring up Tailscale with --unattended so it survives background session switches
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID --unattended
           # Wait for Tailscale to assign an IP
           $tsIP = $null
           $retries = 0
@@ -102,7 +114,7 @@ jobs:
           Write-Host "Username: runneradmin"
           Write-Host "Password: $env:MAIN_ADMIN_PASS"
           Write-Host "------------------"
-          Write-Host "SECONDARY PROFILE:"
+          Write-Host "SECONDARY PROFILE (RECOMMENDED TO USE):"
           Write-Host "Username: RDP"
           Write-Host "Password: $(echo $env:RDP_CREDS)"
           Write-Host "==================`n"
